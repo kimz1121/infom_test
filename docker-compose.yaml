@@ -6,12 +6,11 @@ services:
       context: ./docker
       dockerfile: dockerfile
       args:
-        USERNAME: iw
-        USER_UID: "1000"
-        USER_GID: "1000"
+        USERNAME: ${USERNAME}
+        USER_UID: ${USER_UID}
+        USER_GID: ${USER_GID}
     image: infom_test:latest
-    runtime: nvidia
-    user: "1000:1000"
+    user: "${USER_UID}:${USER_GID}"
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
@@ -29,10 +28,22 @@ services:
               capabilities: [gpu]
     volumes:
       # 소스 코드 마운트 (실시간 개발용)
-      - ${HOME}/code/infom:/home/${USERNAME}/infom
-      - ${HOME}/.cache/huggingface:/home/${USERNAME}/.cache/huggingface
-      - ${HOME}/.cache/torch:/home/${USERNAME}/.cache/torch
-    working_dir: /workspace
+      - type: bind
+        source: ${HOME}/code/infom
+        target: /home/${USERNAME}/infom
+        bind:
+          create_host_path: false   # 호스트 경로 없으면 실패
+      - type: bind
+        source: ${HOME}/.cache/huggingface
+        target: /home/${USERNAME}/.cache/huggingface
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${HOME}/.cache/torch
+        target: /home/${USERNAME}/.cache/torch
+        bind:
+          create_host_path: false
+    working_dir: /home/${USERNAME}
     shm_size: "8gb"
     stdin_open: true
     tty: true

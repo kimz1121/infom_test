@@ -7,7 +7,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1
 
 # 관련 패키지 설치
-RUN apt-get update && apt-get install -y --no-install-recommends \ 
+RUN apt-get update && apt-get install -y --no-install-recommends \
         # 기본 파이썬 설치
         python3.10 \
         python3-pip \
@@ -26,10 +26,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         # Mujoco rendering
         libgl1 \
         libglib2.0-0 \
-        mesalib \
-        glew \
-        # Lerobot video codec
+        libosmesa6-dev \
+        libglew-dev \
+        libegl1-mesa-dev \
+        # Lerobot video codec (PyAV 빌드 대비)
         ffmpeg \
+        pkg-config \
+        libavformat-dev \
+        libavcodec-dev \
+        libavdevice-dev \
+        libavutil-dev \
+        libswscale-dev \
+        libswresample-dev \
+        libavfilter-dev \
         # 패키지 설치 이후 불필요한 임시 파일 제거
         && rm -rf /var/lib/apt/lists/*
 
