@@ -1,0 +1,59 @@
+FROM nvidia/cuda:12.6.3-cudnn-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    TZ=Asia/Seoul \
+    PIP_NO_CACHE_DIR=1
+
+# 관련 패키지 설치
+RUN apt-get update && apt-get install -y --no-install-recommends \ 
+        # 기본 파이썬 설치
+        python3.10 \
+        python3-pip \
+        python3.10-dev \
+        # 필수 사용자 패키지 설치
+        git \
+        wget \
+        curl \
+        sudo \
+        ca-certificates \
+        # 사용자 편의 패키지 설치
+        htop \
+        tmux \
+        screenfetch \
+        # 환경 종속성 설치
+        # Mujoco rendering
+        libgl1 \
+        libglib2.0-0 \
+        mesalib \
+        glew \
+        # Lerobot video codec
+        ffmpeg \
+        # 패키지 설치 이후 불필요한 임시 파일 제거
+        && rm -rf /var/lib/apt/lists/*
+
+# 파이썬 Binary Path 설정
+RUN ln -sf /usr/bin/python3.10 /usr/bin/python \
+    && ln -sf /usr/bin/pip3 /usr/bin/pip
+
+# pip 최신화
+RUN pip install --upgrade pip setuptools wheel
+
+# LeRobot 설치 (Robocasa 등 LeRobot 포맷 데이터셋 로드용)
+RUN pip install lerobot
+
+# ---- non-root 사용자 생성 (호스트 uid/gid에 맞춤) ----
+ARG USERNAME=iw
+ARG USER_UID=1000
+ARG USER_GID=1000
+
+RUN groupadd --gid ${USER_GID} ${USERNAME} \
+    && useradd --uid ${USER_UID} --gid ${USER_GID} -m -s /bin/bash ${USERNAME} \
+    && echo "${USERNAME} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/${USERNAME} \
+    && chmod 0440 /etc/sudoers.d/${USERNAME}
+
+USER ${USERNAME}
+WORKDIR /home/${USERNAME}
+
+CMD ["/bin/bash"]
