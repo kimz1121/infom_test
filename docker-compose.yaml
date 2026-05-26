@@ -29,8 +29,8 @@ services:
     volumes:
       # 소스 코드 마운트 (실시간 개발용)
       - type: bind
-        source: ${HOME}/code/infom
-        target: /home/${USERNAME}/infom
+        source: ${HOME}/code/infom_test
+        target: /home/${USERNAME}/infom_test
         bind:
           create_host_path: false   # 호스트 경로 없으면 실패
       - type: bind
