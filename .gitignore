@@ -10,3 +10,5 @@ dist/
 .vscode/
 submitit/
 .env
+
+exp/**/*
