@@ -64,17 +64,22 @@ from utils.flax_utils import restore_agent  # noqa: E402
 
 GRIPPER_CONTACT_IDX = 18
 BLOCK_Z_IDX = 21
-PHASE_ORDER = ["reach", "grasp", "transport", "release"]
+# 'pick'  = closing-on-table grasp (followed by transport).
+# 'place' = opening-prep grasp     (preceded by transport).
+# 'grasp' = ambiguous grasp (no transport within the window either side).
+PHASE_ORDER = ["reach", "pick", "transport", "place", "release", "grasp"]
 PHASE_COLORS = {
     "reach":     "tab:blue",
-    "grasp":     "tab:orange",
+    "pick":      "tab:orange",   # closing gripper → about to lift
     "transport": "tab:green",
+    "place":     "tab:purple",   # opening gripper → about to release
     "release":   "tab:red",
+    "grasp":     "0.5",          # rarely used — only if ambiguous
 }
 
 
-def derive_phase_labels(raw_obs: np.ndarray) -> np.ndarray:
-    """Return a string phase label per row of un-normalized observations."""
+def _derive_phase_labels_4cls(raw_obs: np.ndarray) -> np.ndarray:
+    """4-class labels (reach/grasp/transport/release) from raw cube-single obs."""
     gc = raw_obs[:, GRIPPER_CONTACT_IDX] > 0.5
     hi = raw_obs[:, BLOCK_Z_IDX] > 0.5
     labels = np.empty(len(raw_obs), dtype=object)
@@ -83,6 +88,55 @@ def derive_phase_labels(raw_obs: np.ndarray) -> np.ndarray:
     labels[ gc &  hi] = "transport"
     labels[~gc &  hi] = "release"
     return labels
+
+
+def derive_phase_labels(
+    raw_obs_all: np.ndarray,
+    terminals_all: np.ndarray,
+    idxs: np.ndarray,
+    *,
+    window: int = 10,
+) -> np.ndarray:
+    """5-class labels for a subset of dataset indices.
+
+    Each 'grasp' step is split into 'pick' vs 'place' by looking at the
+    nearest steps within the same episode:
+
+        - 'pick'  : transport exists within the NEXT  `window` in-episode steps.
+        - 'place' : transport exists within the PREV  `window` in-episode steps.
+        - 'grasp' : neither (ambiguous; rare except near episode edges).
+
+    Args:
+        raw_obs_all:   un-normalized observations for the whole dataset.
+                       Required because the temporal window must stay
+                       inside the episode containing each idx.
+        terminals_all: terminals over the whole dataset (for ep bounds).
+        idxs: which rows to label.
+    """
+    base = _derive_phase_labels_4cls(raw_obs_all)
+
+    term_locs = np.nonzero(terminals_all > 0)[0]
+    init_locs = np.concatenate([[0], term_locs[:-1] + 1])
+    ep_of = np.searchsorted(term_locs, np.arange(len(raw_obs_all)))
+    ep_start_of = init_locs[ep_of]
+    ep_end_of = term_locs[ep_of]
+
+    out = base[idxs].copy()
+    for j, i in enumerate(idxs):
+        if base[i] != "grasp":
+            continue
+        lo = max(int(ep_start_of[i]), int(i) - window)
+        hi = min(int(ep_end_of[i]) + 1, int(i) + 1 + window)
+        future = base[i + 1: hi]
+        past = base[lo: i]
+        f_t = (future == "transport").any() if len(future) else False
+        p_t = (past == "transport").any() if len(past) else False
+        if f_t and not p_t:
+            out[j] = "pick"
+        elif p_t and not f_t:
+            out[j] = "place"
+        # else: leave as 'grasp'
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +249,75 @@ VIEW_ANGLES_3D = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Auto-pick the (elev, azim) viewing angle that maximizes phase separation.
+# t-SNE/UMAP have no canonical axis ordering, so the hardcoded angles above
+# can hide structure that a different view would reveal.
+# ---------------------------------------------------------------------------
+
+def _view_projection_2d(points_3d: np.ndarray, elev_deg: float, azim_deg: float) -> np.ndarray:
+    """Project 3D points onto matplotlib's screen plane for view_init(elev, azim).
+
+    Matches the orthographic projection that matplotlib uses for 3D scatters
+    — close enough that maximizing the score on this projection picks a
+    viewing angle whose rendered scatter looks visually well-separated.
+    """
+    elev = np.radians(elev_deg)
+    azim = np.radians(azim_deg)
+    cos_a, sin_a = np.cos(azim), np.sin(azim)
+    cos_e, sin_e = np.cos(elev), np.sin(elev)
+    x = points_3d[:, 0]
+    y = points_3d[:, 1]
+    z = points_3d[:, 2]
+    x_screen = -sin_a * x + cos_a * y
+    y_screen = -sin_e * (cos_a * x + sin_a * y) + cos_e * z
+    return np.stack([x_screen, y_screen], axis=-1)
+
+
+def _class_separation_score(points_2d: np.ndarray, labels: np.ndarray) -> float:
+    """Fisher-like ratio: between-class scatter / within-class scatter.
+
+    Higher = phases form more compact, more separated clusters when
+    projected to this 2D plane. Class-frequency weighted so a rare phase
+    can't dominate or be ignored.
+    """
+    global_mean = points_2d.mean(axis=0)
+    between = 0.0
+    within = 0.0
+    for c in np.unique(labels):
+        m = labels == c
+        if m.sum() < 2:
+            continue
+        pts_c = points_2d[m]
+        mu_c = pts_c.mean(axis=0)
+        between += int(m.sum()) * np.sum((mu_c - global_mean) ** 2)
+        within += np.sum((pts_c - mu_c) ** 2)
+    return float(between / max(within, 1e-9))
+
+
+def find_best_view_3d(
+    embedded_3d: np.ndarray,
+    labels: np.ndarray,
+    *,
+    elev_step: int = 10,
+    azim_step: int = 10,
+) -> tuple[tuple[int, int], float]:
+    """Grid-search (elev, azim) that maximizes phase cluster separation.
+
+    Returns ((elev, azim), score).
+    """
+    best_score = -np.inf
+    best_view = (20, -60)
+    for elev in range(-80, 81, elev_step):
+        for azim in range(0, 360, azim_step):
+            proj = _view_projection_2d(embedded_3d, float(elev), float(azim))
+            score = _class_separation_score(proj, labels)
+            if score > best_score:
+                best_score = score
+                best_view = (int(elev), int(azim))
+    return best_view, float(best_score)
+
+
 def _scatter_phases_2d(ax, embedded, lab_sub, title, *, axis_label):
     for phase in PHASE_ORDER:
         m = lab_sub == phase
@@ -230,6 +353,88 @@ def _scatter_phases_3d(ax, embedded, lab_sub, title, *, axis_label, view):
     ax.set_title(f"{title}\nelev={elev}°, azim={azim}°", fontsize=9)
 
 
+def _save_pair_grid_solo(out_path, embedded, lab_sub, *, axis_label, base_title):
+    """All C(n,2) 2D pair-scatters of an n-component embedding in one PNG.
+
+    Useful when n_components >= 3 — you get axis (1,2), (1,3), (2,3), …
+    side-by-side, which is the closest analogue to "different principal
+    axes" for t-SNE/UMAP (which have no inherent axis ordering).
+    """
+    n_components = embedded.shape[1]
+    pairs = [(i, j) for i in range(n_components) for j in range(i + 1, n_components)]
+    n_cols = min(3, len(pairs))
+    n_rows = (len(pairs) + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(5.0 * n_cols, 4.4 * n_rows),
+        squeeze=False,
+    )
+    axes_flat = axes.flatten()
+    for ax_, (i, j) in zip(axes_flat, pairs):
+        for phase in PHASE_ORDER:
+            m = lab_sub == phase
+            if not m.any():
+                continue
+            ax_.scatter(
+                embedded[m, i], embedded[m, j],
+                s=8, alpha=0.55, color=PHASE_COLORS[phase],
+                label=f"{phase} (n={int(m.sum())})",
+            )
+        ax_.set_xlabel(f"{axis_label} {i + 1}")
+        ax_.set_ylabel(f"{axis_label} {j + 1}")
+        ax_.grid(True, alpha=0.3)
+    axes_flat[0].legend(loc="best", fontsize=8)
+    for ax_ in axes_flat[len(pairs):]:
+        ax_.axis("off")
+    fig.suptitle(base_title, fontsize=11)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+
+
+def _save_pair_grid_combined(
+    out_path, source_to_embedded, lab_sub, *,
+    axis_label, method_label, source_titles,
+):
+    """Combined pair grid — rows = source (mean / sample), cols = pairs."""
+    sources = list(source_to_embedded.items())
+    n_sources = len(sources)
+    n_components = sources[0][1].shape[1]
+    pairs = [(i, j) for i in range(n_components) for j in range(i + 1, n_components)]
+    n_cols = len(pairs)
+    fig, axes = plt.subplots(
+        n_sources, n_cols,
+        figsize=(4.5 * n_cols, 4.0 * n_sources),
+        squeeze=False,
+    )
+    for r, (name, embedded) in enumerate(sources):
+        for c, (i, j) in enumerate(pairs):
+            ax_ = axes[r, c]
+            for phase in PHASE_ORDER:
+                m = lab_sub == phase
+                if not m.any():
+                    continue
+                ax_.scatter(
+                    embedded[m, i], embedded[m, j],
+                    s=8, alpha=0.55, color=PHASE_COLORS[phase],
+                    label=f"{phase} (n={int(m.sum())})" if (r == 0 and c == 0) else None,
+                )
+            ax_.set_xlabel(f"{axis_label} {i + 1}")
+            ax_.set_ylabel(f"{axis_label} {j + 1}")
+            ax_.grid(True, alpha=0.3)
+            if c == 0:
+                ax_.set_title(source_titles[name], fontsize=9)
+        axes[r, 0].legend(loc="best", fontsize=7)
+    fig.suptitle(
+        f"{method_label} pairwise component scatters of intention latent z, "
+        f"colored by manipulation phase",
+        fontsize=12,
+    )
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+
+
 def _save_3d_solo(out_path, embedded, lab_sub, *, axis_label, base_title):
     fig = plt.figure(figsize=(12, 10))
     for i, view in enumerate(VIEW_ANGLES_3D):
@@ -243,6 +448,88 @@ def _save_3d_solo(out_path, embedded, lab_sub, *, axis_label, base_title):
     fig.tight_layout()
     fig.savefig(out_path, dpi=130)
     plt.close(fig)
+
+
+def _save_3d_quadview_solo(out_path, embedded, lab_sub, *, axis_label, base_title):
+    """2x2 grid: top-left = auto-best view, others = three fixed iso views.
+
+    This is the "compare the best automatically-chosen angle against the
+    canonical iso views" layout — quick at-a-glance check that the
+    best-view picker isn't producing a misleading projection.
+    """
+    best, score = find_best_view_3d(embedded, lab_sub)
+    panels = [
+        (best,         f"auto-best  elev={best[0]}°, azim={best[1]}°  score={score:.3f}"),
+        ((20, -60),    "elev=20°, azim=-60°"),
+        ((20,  30),    "elev=20°, azim=30°"),
+        ((20, 120),    "elev=20°, azim=120°"),
+    ]
+    fig = plt.figure(figsize=(12, 10))
+    for i, (view, subtitle) in enumerate(panels):
+        ax = fig.add_subplot(2, 2, i + 1, projection="3d")
+        _scatter_phases_3d(
+            ax, embedded, lab_sub, subtitle,
+            axis_label=axis_label, view=view,
+        )
+        if i == 0:
+            ax.legend(loc="upper left", fontsize=8)
+    fig.suptitle(base_title, fontsize=11)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+    return best, score
+
+
+def _save_3d_best_solo(out_path, embedded, lab_sub, *, axis_label, base_title):
+    """Single 3D scatter from the auto-found best (elev, azim)."""
+    best, score = find_best_view_3d(embedded, lab_sub)
+    fig = plt.figure(figsize=(8, 7))
+    ax = fig.add_subplot(111, projection="3d")
+    _scatter_phases_3d(
+        ax, embedded, lab_sub, base_title,
+        axis_label=axis_label, view=best,
+    )
+    ax.legend(loc="upper left", fontsize=8)
+    fig.suptitle(
+        f"auto-selected best view (max Fisher ratio): "
+        f"elev={best[0]}°, azim={best[1]}°  |  score={score:.3f}",
+        fontsize=10,
+    )
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+    return best, score
+
+
+def _save_3d_best_combined(
+    out_path, source_to_embedded, lab_sub, *,
+    axis_label, method_label, source_titles,
+):
+    """Side-by-side 3D scatters at each source's auto-found best view."""
+    n_sources = len(source_to_embedded)
+    fig = plt.figure(figsize=(7.2 * n_sources, 6.4))
+    chosen: dict[str, tuple[tuple[int, int], float]] = {}
+    for i, (name, embedded) in enumerate(source_to_embedded.items()):
+        best, score = find_best_view_3d(embedded, lab_sub)
+        chosen[name] = (best, score)
+        ax = fig.add_subplot(1, n_sources, i + 1, projection="3d")
+        _scatter_phases_3d(
+            ax, embedded, lab_sub,
+            f"{source_titles[name]}\nbest view: elev={best[0]}°, azim={best[1]}°"
+            f"  |  score={score:.3f}",
+            axis_label=axis_label, view=best,
+        )
+        if i == 0:
+            ax.legend(loc="upper left", fontsize=8)
+    fig.suptitle(
+        f"{method_label} (3D) — auto-selected best view per source "
+        f"(maximizes phase-cluster separation)",
+        fontsize=12,
+    )
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=130)
+    plt.close(fig)
+    return chosen
 
 
 def _save_3d_combined(out_path, source_to_embedded, lab_sub, *, axis_label,
@@ -400,8 +687,85 @@ def plot_embedding_by_phase(
                 axis_label=axis_label,
                 base_title=per_source_solo_title[name],
             )
+        # Auto-best view (grid-searched (elev, azim) maximizing phase
+        # cluster separation). Stored under <stem>_best.png.
+        best_combined_path = out_path.with_name(
+            out_path.stem + "_best" + out_path.suffix
+        )
+        chosen = _save_3d_best_combined(
+            best_combined_path, per_source_embedded, lab_sub,
+            axis_label=axis_label, method_label=method_label,
+            source_titles=per_source_panel_title,
+        )
+        print(
+            f"  [{method_label}] auto-best 3D views: " +
+            ", ".join(
+                f"{n}=(elev={e}°, azim={a}°, score={s:.3f})"
+                for n, ((e, a), s) in chosen.items()
+            )
+        )
+        for name in z_sources:
+            best_solo_path = out_path.with_name(
+                f"{out_path.stem}_{name}_best" + out_path.suffix
+            )
+            _save_3d_best_solo(
+                best_solo_path, per_source_embedded[name], lab_sub,
+                axis_label=axis_label,
+                base_title=per_source_solo_title[name],
+            )
+        # 2x2 quad-view: auto-best + three fixed iso angles, per source.
+        for name in z_sources:
+            quad_solo_path = out_path.with_name(
+                f"{out_path.stem}_{name}_quad" + out_path.suffix
+            )
+            _save_3d_quadview_solo(
+                quad_solo_path, per_source_embedded[name], lab_sub,
+                axis_label=axis_label,
+                base_title=per_source_solo_title[name],
+            )
+        # Additionally save pair-grids (all C(3,2)=3 axis pairs as 2D scatters).
+        # t-SNE / UMAP axes have no canonical ordering, so different pairs
+        # give different views of the same embedding.
+        pairs_combined = out_path.with_name(
+            out_path.stem.replace(f"{n_components}d", "pairs") + out_path.suffix
+        )
+        _save_pair_grid_combined(
+            pairs_combined, per_source_embedded, lab_sub,
+            axis_label=axis_label, method_label=method_label,
+            source_titles=per_source_panel_title,
+        )
+        for name in z_sources:
+            pairs_solo = out_path.with_name(
+                out_path.stem.replace(f"{n_components}d", "pairs")
+                + f"_{name}" + out_path.suffix
+            )
+            _save_pair_grid_solo(
+                pairs_solo, per_source_embedded[name], lab_sub,
+                axis_label=axis_label,
+                base_title=per_source_solo_title[name],
+            )
+    elif n_components >= 4:
+        # 3D scatter doesn't apply for n>3; only pair-grids.
+        pairs_combined = out_path.with_name(
+            out_path.stem.replace(f"{n_components}d", "pairs") + out_path.suffix
+        )
+        _save_pair_grid_combined(
+            pairs_combined, per_source_embedded, lab_sub,
+            axis_label=axis_label, method_label=method_label,
+            source_titles=per_source_panel_title,
+        )
+        for name in z_sources:
+            pairs_solo = out_path.with_name(
+                out_path.stem.replace(f"{n_components}d", "pairs")
+                + f"_{name}" + out_path.suffix
+            )
+            _save_pair_grid_solo(
+                pairs_solo, per_source_embedded[name], lab_sub,
+                axis_label=axis_label,
+                base_title=per_source_solo_title[name],
+            )
     else:
-        raise ValueError(f"n_components must be 2 or 3, got {n_components}")
+        raise ValueError(f"n_components must be >= 2, got {n_components}")
 
     return {"per_phase_counts": per_phase_counts, "per_source_info": per_source_info}
 
@@ -409,8 +773,9 @@ def plot_embedding_by_phase(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--run_dir", type=str, default="exp/debug/sd000_20260526_155243",
-        help="Run directory containing flags.json and params_<epoch>.pkl",
+        "--run_dir", type=str, default=None,
+        help="Run directory with flags.json and params_<epoch>.pkl. "
+             "Defaults to the most recent run under exp/debug/.",
     )
     parser.add_argument("--epoch", type=int, default=None)
     parser.add_argument(
@@ -431,15 +796,38 @@ def main() -> None:
         help="Which embedding to compute.",
     )
     parser.add_argument(
-        "--n_components", type=int, default=2, choices=[2, 3],
-        help="Embedding dimensionality. 3 produces a 4-view PNG grid.",
+        "--n_components", type=int, default=2,
+        help="Embedding dimensionality. 2 = single 2D scatter. "
+             "3 = 4-view 3D grid + pairwise 2D pair-grid (axes 1-2, 1-3, 2-3). "
+             ">=4 = pairwise 2D pair-grid only.",
+    )
+    parser.add_argument(
+        "--phase_window", type=int, default=10,
+        help="Within-episode lookahead/lookback window (in steps) used to "
+             "split 'grasp' into 'pick' vs 'place'.",
+    )
+    parser.add_argument(
+        "--sources", type=str, default="mean",
+        choices=["mean", "sample", "both"],
+        help="Which z source to visualize. 'mean' = posterior mean (default; "
+             "shows phase structure most clearly). 'sample' = a single "
+             "draw from q(z|s,a) (noisier; usually less useful). 'both' = "
+             "side-by-side comparison.",
     )
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
-    run_dir = Path(args.run_dir)
-    if not run_dir.is_absolute():
-        run_dir = PROJECT_ROOT / run_dir
+    if args.run_dir is None:
+        debug_root = PROJECT_ROOT / "exp" / "debug"
+        candidates = sorted(p for p in debug_root.iterdir() if p.is_dir())
+        if not candidates:
+            raise FileNotFoundError(f"No run directories under {debug_root}")
+        run_dir = candidates[-1]
+        print(f"(no --run_dir given; using latest: {run_dir.name})")
+    else:
+        run_dir = Path(args.run_dir)
+        if not run_dir.is_absolute():
+            run_dir = PROJECT_ROOT / run_dir
     if not run_dir.exists():
         raise FileNotFoundError(run_dir)
 
@@ -476,7 +864,10 @@ def main() -> None:
 
     rng = jax.random.PRNGKey(args.seed)
     mean, std, z_sample = encode_latents(agent, batch, rng)
-    phases = derive_phase_labels(raw_obs[idxs])
+    phases = derive_phase_labels(
+        raw_obs, np.asarray(pre_train["terminals"]), idxs,
+        window=args.phase_window,
+    )
     phase_counts_total = {p: int((phases == p).sum()) for p in PHASE_ORDER}
     print(
         f"Encoded {args.num_samples} samples. "
@@ -487,6 +878,13 @@ def main() -> None:
 
     out_dir = run_dir / "plots" / "latent_phase"
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    all_z_sources = {"mean": mean, "sample": z_sample}
+    if args.sources == "both":
+        z_sources = all_z_sources
+    else:
+        z_sources = {args.sources: all_z_sources[args.sources]}
+    print(f"Visualizing sources: {list(z_sources.keys())}")
 
     methods = ["tsne", "umap"] if args.method == "both" else [args.method]
     per_method_info: dict[str, dict] = {}
@@ -501,7 +899,7 @@ def main() -> None:
             f"min_dist={args.umap_min_dist}) ..."
         )
         info = plot_embedding_by_phase(
-            {"mean": mean, "sample": z_sample}, phases, out_path,
+            z_sources, phases, out_path,
             method=method,
             n_components=args.n_components,
             max_total=args.tsne_samples,
