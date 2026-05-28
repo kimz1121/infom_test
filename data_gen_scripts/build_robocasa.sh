@@ -36,13 +36,15 @@ GENERATE="$SCRIPT_DIR/generate_robocasa_dataset.py"
 
 COMPOSITE_TASKS=(LoadDishwasher PlaceVeggiesInDrawer StackBowlsCabinet StartElectricKettle)
 
-GROUPS=("$@")
-if [ "${#GROUPS[@]}" -eq 0 ]; then
-  GROUPS=(all)
+# NB: do not name this GROUPS — that's a bash special array (user's group IDs)
+# whose assignments are ignored, so the default would silently break.
+REQ_GROUPS=("$@")
+if [ "${#REQ_GROUPS[@]}" -eq 0 ]; then
+  REQ_GROUPS=(all)
 fi
 want() {
   local g
-  for g in "${GROUPS[@]}"; do
+  for g in "${REQ_GROUPS[@]}"; do
     [ "$g" = "all" ] && return 0
     [ "$g" = "$1" ] && return 0
   done
@@ -60,7 +62,7 @@ generate() {
   "$PY" "$GENERATE" --raw_root "$RAW" --out_dir "$DATA" --name "$name" "$@"
 }
 
-echo "ROBOCASA_ROOT=$ROOT  FT_TASK=$FT_TASK  groups=${GROUPS[*]}"
+echo "ROBOCASA_ROOT=$ROOT  FT_TASK=$FT_TASK  groups=${REQ_GROUPS[*]}"
 
 # --- 1. Download raw tars from Box --------------------------------------------
 if want atomic-state || want atomic-image; then
