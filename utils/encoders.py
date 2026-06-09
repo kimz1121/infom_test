@@ -252,6 +252,53 @@ class GCEncoder(nn.Module):
         return reps
 
 
+class MLPConcatFusion(nn.Module):
+    """Learned 'option B' late fusion over PRECOMPUTED features.
+
+    The observation is a flat vector [image_feat (image_feat_dim) | proprio_state
+    (the rest)] — exactly what data_gen_scripts/extract_mm_features.py stores.
+    This splits it, pushes the low-dim state through a small MLP (so it is not
+    drowned out by the 512-d image feature), and concatenates the result with the
+    raw image feature. The frozen resnet stays OUT of the training loop, so this
+    is as cheap as the encoder=None precompute path. Output = image_feat_dim +
+    state_hidden_dims[-1]. Used with config.encoder='precompute_state_mlp'.
+    """
+
+    image_feat_dim: int = 512
+    state_hidden_dims: Sequence[int] = (128, 128)
+    layer_norm: bool = True
+
+    @nn.compact
+    def __call__(self, observations, train=True):
+        feat = observations[..., : self.image_feat_dim]
+        state = observations[..., self.image_feat_dim:]
+        state_emb = MLP(self.state_hidden_dims, activate_final=True,
+                        layer_norm=self.layer_norm)(state)
+        return jnp.concatenate([feat, state_emb], axis=-1)
+
+
+class MultiModalEncoder(nn.Module):
+    """Late-fusion encoder: image features concatenated with raw proprio state.
+
+    Expects dict observations with keys ``image`` (B, H, W, 3 uint8) and
+    ``state`` (B, D_state). The image encoder normalizes pixels internally
+    (ResNetEncoder does x/127.5 - 1), so the image is passed through raw; the
+    low-dim state is concatenated unchanged (option A — no separate state MLP).
+    Output dim = image_encoder_out + D_state.
+    """
+
+    image_encoder_cls: Any
+    image_key: str = 'image'
+    state_key: str = 'state'
+
+    @nn.compact
+    def __call__(self, observations, train=True):
+        image = observations[self.image_key]
+        state = observations[self.state_key].astype(jnp.float32)
+        image_feat = self.image_encoder_cls(name='image_encoder')(image)
+        return jnp.concatenate([image_feat, state], axis=-1)
+
+
 encoder_modules = {
     'mlp': functools.partial(
         MLP,
@@ -280,3 +327,19 @@ encoder_modules = {
         num_spatial_blocks=8
     ),
 }
+
+# Multimodal (image + proprio state) late-fusion encoder built on resnet_34.
+# resnet_34 emits a 512-d feature (num_filters * 2**(len(stage_sizes)-1)); the
+# fused output is 512 + D_state.
+encoder_modules['multimodal_resnet34'] = functools.partial(
+    MultiModalEncoder,
+    image_encoder_cls=encoder_modules['resnet_34'],
+)
+
+# Learned 'option B' fusion head over precomputed [resnet34 feat (512) | state]
+# vectors — state through an MLP before concat. No resnet in the training loop.
+encoder_modules['precompute_state_mlp'] = functools.partial(
+    MLPConcatFusion,
+    image_feat_dim=512,
+    state_hidden_dims=(128, 128),
+)

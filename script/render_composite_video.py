@@ -61,6 +61,7 @@ from script.visualize_composite_traj import (  # noqa: E402
 from script.visualize_latent_robocasa import (  # noqa: E402
     build_agent_and_pretrain_dataset,
     derive_task_labels,
+    distinct_color_map,
     encode_latents,
     _resolve_stats_path,
 )
@@ -78,7 +79,7 @@ def composite_task_name_from_basename(composite_basename: str) -> str:
     (case-insensitive) so we don't have to hardcode camel-case.
     """
     base = composite_basename
-    for suffix in ("_state", "_image"):
+    for suffix in ("_multimodal", "_lang", "_state", "_image"):
         if base.endswith(suffix):
             base = base[: -len(suffix)]
             break
@@ -156,7 +157,7 @@ def prepare_data(args):
 
     stats_path = _resolve_stats_path(env_name, args.robocasa_dir)
     atomic_labels, present_tasks = derive_task_labels(a_idxs, stats_path, len(raw_obs))
-    color_map = _high_contrast_color_map()
+    color_map = distinct_color_map(present_tasks)  # sized to all present atomic tasks (up to 65)
 
     # Load composite episode.
     comp_hdf5 = osp.join(osp.expanduser(args.robocasa_dir), f"{args.composite_name}.hdf5")
@@ -453,7 +454,8 @@ def main():
     frames = decode_all_frames(mp4)
     print(f"  {len(frames)} frames @ {frames.shape[1]}x{frames.shape[2]}")
 
-    out_dir = data["run_dir"] / "plots" / "latent_robocasa"
+    # Per-checkpoint subfolder so different epochs (and runs) never overwrite.
+    out_dir = data["run_dir"] / "plots" / "composite_validation" / f"ep{data['epoch']}"
     out_dir.mkdir(parents=True, exist_ok=True)
     for method, (emb_atomic, emb_comp) in data["embeddings"].items():
         out_path = (out_dir

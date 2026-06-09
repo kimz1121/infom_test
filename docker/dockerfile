@@ -63,6 +63,7 @@ RUN groupadd --gid ${USER_GID} ${USERNAME} \
     && chmod 0440 /etc/sudoers.d/${USERNAME}
 
 USER ${USERNAME}
+ENV HOME=/home/${USERNAME}
 WORKDIR /home/${USERNAME}
 
 CMD ["/bin/bash"]

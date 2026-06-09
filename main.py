@@ -71,8 +71,13 @@ def main(_):
     config = FLAGS.agent
     _, _, pretraining_train_dataset, pretraining_val_dataset = make_env_and_datasets(
         FLAGS.env_name, frame_stack=FLAGS.frame_stack, max_size=FLAGS.pretraining_size, reward_free=True)
-    _, eval_env, finetuning_train_dataset, finetuning_val_dataset = make_env_and_datasets(
-        FLAGS.env_name, frame_stack=FLAGS.frame_stack, max_size=FLAGS.finetuning_size, reward_free=False)
+    if FLAGS.finetuning_steps > 0:
+        _, eval_env, finetuning_train_dataset, finetuning_val_dataset = make_env_and_datasets(
+            FLAGS.env_name, frame_stack=FLAGS.frame_stack, max_size=FLAGS.finetuning_size, reward_free=False)
+    else:
+        # Pretraining-only (embedding) run: no reward-labeled finetune dataset needed.
+        eval_env = None
+        finetuning_train_dataset = finetuning_val_dataset = None
 
     if FLAGS.video_episodes > 0:
         assert 'singletask' in FLAGS.env_name, 'Rendering is currently only supported for OGBench environments.'
@@ -83,7 +88,8 @@ def main(_):
 
     # Set up datasets.
     pretraining_train_dataset = Dataset.create(**pretraining_train_dataset)
-    finetuning_train_dataset = Dataset.create(**finetuning_train_dataset)
+    if finetuning_train_dataset is not None:
+        finetuning_train_dataset = Dataset.create(**finetuning_train_dataset)
     if config['agent_name'] == 'mbpo_rebrac':
         # Create a separate replay buffer so that we can sample from both the training dataset and imaginary rollouts.
         example_transition = {k: v[0] for k, v in finetuning_train_dataset.items()}
@@ -98,7 +104,9 @@ def main(_):
             dataset.num_aug = FLAGS.num_aug
             dataset.inplace_aug = FLAGS.inplace_aug
             dataset.frame_stack = FLAGS.frame_stack
-            if config['agent_name'] in ['infom', 'rebrac', 'dino_rebrac', 'mbpo_rebrac',
+            if config['agent_name'] in ['infom', 'infom_multimodal', 'infom_state_decoder',
+                                        'infom_lang_state_decoder',
+                                        'rebrac', 'dino_rebrac', 'mbpo_rebrac',
                                         'td_infonce', 'fb_repr_fom', 'hilp_fom']:
                 dataset.return_next_actions = True
             dataset.normalize_observations()
@@ -146,7 +154,7 @@ def main(_):
             agent, update_info = agent.pretrain(batch)
         else:
             if i == (FLAGS.pretraining_steps + 1):
-                if config['agent_name'] in ['infom', 'dino_rebrac', 'td_infonce', 'hilp']:
+                if config['agent_name'] in ['infom', 'infom_multimodal', 'dino_rebrac', 'td_infonce', 'hilp']:
                     agent.target_reset()
 
                 # Infer the latent vector.

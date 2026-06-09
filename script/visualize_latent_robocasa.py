@@ -105,19 +105,60 @@ TASK_FAMILY_MAP = {
     "TurnOnSinkFaucet": "Knob",
     "NavigateKitchen": "Navigate",
 }
-FAMILY_ORDER = ["PickPlace", "Articulated", "Knob", "Navigate"]
+FAMILY_ORDER = ["PickPlace", "Articulated", "Knob", "Navigate", "Other"]
 FAMILY_COLORS = {
     "PickPlace": "tab:blue",
     "Articulated": "tab:orange",
     "Knob": "tab:green",
     "Navigate": "tab:red",
+    "Other": "tab:gray",
 }
 
 
-def _task_color_map() -> dict:
-    """One distinct color per task using tab20."""
-    cmap = plt.get_cmap("tab20")
-    return {t: cmap(i % 20) for i, t in enumerate(ATOMIC_SEEN_18)}
+def family_of(task: str) -> str:
+    """Motion family for any atomic task name (prefix heuristic + 18-task map).
+
+    The 18 ATOMIC_SEEN tasks use the curated TASK_FAMILY_MAP; the remaining
+    Robocasa atomic tasks (all 65) fall back to a name-prefix rule so family
+    coloring stays meaningful without hand-labeling every task.
+    """
+    if task in TASK_FAMILY_MAP:
+        return TASK_FAMILY_MAP[task]
+    if task.startswith("PickPlace"):
+        return "PickPlace"
+    if task.startswith(("Open", "Close", "Slide")):
+        return "Articulated"
+    if task.startswith(("TurnOn", "TurnOff", "Turn", "Adjust", "Lower", "Preheat", "Start")):
+        return "Knob"
+    if task.startswith("Navigate"):
+        return "Navigate"
+    return "Other"
+
+
+def distinct_color_map(tasks) -> dict:
+    """Return {task: rgba} with as-distinct-as-possible colors for any N tasks.
+
+    Concatenates tab20/tab20b/tab20c (60 distinct qualitative colors); for >60
+    tasks it falls back to evenly spaced HSV hues so colors never silently
+    collide the way a single 20-color cycle would.
+    """
+    import matplotlib.colors as mcolors
+
+    tasks = list(tasks)
+    palette = []
+    for name in ("tab20", "tab20b", "tab20c"):
+        palette.extend(plt.get_cmap(name).colors)
+    if len(tasks) > len(palette):
+        hsv = plt.get_cmap("hsv")
+        palette = [hsv(i / len(tasks)) for i in range(len(tasks))]
+        palette = [mcolors.to_rgba(c) for c in palette]
+    return {t: palette[i] for i, t in enumerate(tasks)}
+
+
+def _task_color_map(tasks=None) -> dict:
+    """One distinct color per task. Defaults to the 18 ATOMIC_SEEN tasks; pass a
+    task list (e.g. the present 65) to get a palette sized to it."""
+    return distinct_color_map(tasks if tasks is not None else ATOMIC_SEEN_18)
 
 
 # ---------------------------------------------------------------------------
@@ -143,9 +184,10 @@ def derive_task_labels(
     task_T = stats["tasks"]
     boundaries = [0]
     present_tasks: list[str] = []
-    for t in ATOMIC_SEEN_18:
-        if t not in task_T:
-            continue
+    # Iterate tasks in the stats file's own (insertion) order, which matches the
+    # order tasks were concatenated into the HDF5 — works for the 18-task set
+    # (built in ATOMIC_SEEN_18 order) and any larger set (e.g. all 65 atomic).
+    for t in task_T:
         n = int(task_T[t]["train_T"])
         nxt = min(boundaries[-1] + n, dataset_len)
         if nxt > boundaries[-1]:
@@ -163,8 +205,8 @@ def derive_task_labels(
 def derive_task_family_labels(
     task_labels: np.ndarray,
 ) -> tuple[np.ndarray, list[str]]:
-    """Collapse 18 task names → 4 motion families using TASK_FAMILY_MAP."""
-    fam = np.array([TASK_FAMILY_MAP.get(t, "Other") for t in task_labels], dtype=object)
+    """Collapse task names → motion families (family_of handles all 65 tasks)."""
+    fam = np.array([family_of(t) for t in task_labels], dtype=object)
     present = [f for f in FAMILY_ORDER if (fam == f).any()]
     return fam, present
 

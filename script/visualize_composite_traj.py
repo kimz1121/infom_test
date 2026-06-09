@@ -61,6 +61,7 @@ from script.visualize_latent_robocasa import (  # noqa: E402
     _task_color_map,
     build_agent_and_pretrain_dataset,
     derive_task_labels,
+    distinct_color_map,
     encode_latents,
     _resolve_stats_path,
 )
@@ -351,8 +352,7 @@ def main() -> None:
 
     stats_path = _resolve_stats_path(env_name, args.robocasa_dir)
     atomic_labels, present_tasks = derive_task_labels(a_idxs, stats_path, len(raw_obs))
-    color_map = (_high_contrast_color_map() if args.palette == "high_contrast"
-                 else _task_color_map())
+    color_map = distinct_color_map(present_tasks)  # sized to all present atomic tasks (up to 65)
     print(f"Atomic present_tasks={present_tasks}")
     print(f"Palette: {args.palette}")
 
@@ -382,7 +382,7 @@ def main() -> None:
     print(f"Mean vote confidence: {conf.mean():.3f}")
 
     # --- 5. Embeddings: UMAP transform + joint t-SNE. ----------------------
-    out_dir = run_dir / "plots" / "latent_robocasa"
+    out_dir = run_dir / "plots" / "composite_validation" / f"ep{epoch}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Subsample atomic for plotting (stratified by task to keep all classes).
