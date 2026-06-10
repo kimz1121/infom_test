@@ -1,13 +1,17 @@
-"""Numerical inter-instruction distance analysis for LIBERO-Goal latents.
+"""Numerical inter-task distance analysis for Robocasa atomic_65 latents.
 
-LIBERO analogue of script/analyze_task_distances.py. For each of the 10
-LIBERO-Goal instructions we collect q(z|s,a) posterior means, take the per-task
+Variant of script/analyze_task_distances.py for the full 65-task atomic pool
+(the 18-task script hardcodes ATOMIC_SEEN_18). For every task present in the
+loaded pretrain prefix we collect q(z|s,a) posterior means, take the per-task
 centroid, and compute euclidean / cosine / mahalanobis pairwise distance
 matrices, plus heatmaps, MDS-2D layouts and per-sample PCA/LDA scatters.
 
-All metric/projection machinery is reused from analyze_task_distances; only the
-task list and the family-aware coloring are LIBERO-specific (imported from
-visualize_latent_libero).
+All metric/projection machinery is reused from analyze_task_distances; the only
+atomic_65-specific parts are:
+  * task ownership ranges are derived from the .stats.json task order (all 65),
+    exactly as visualize_latent_robocasa.derive_task_labels does, instead of the
+    fixed ATOMIC_SEEN_18 list.
+  * family coloring uses family_of() (prefix heuristic covers all 65 tasks).
 
 Outputs under <run_dir>/plots/task_distances/:
   {euclidean,cosine,mahalanobis}_heatmap.png / .csv / _mds2d.png
@@ -15,9 +19,9 @@ Outputs under <run_dir>/plots/task_distances/:
   task_distances.json
 
 Usage:
-    python script/analyze_task_distances_libero.py                 # latest run
-    python script/analyze_task_distances_libero.py --space obs     # baseline
-    python script/analyze_task_distances_libero.py --per_task 1500 --source mean
+    python script/analyze_task_distances_atomic65.py --run_dir exp/<...>/<run>
+    python script/analyze_task_distances_atomic65.py --run_dir <run> --space obs
+    python script/analyze_task_distances_atomic65.py --run_dir <run> --per_task 1500 --scatter_embed both
 """
 
 from __future__ import annotations
@@ -52,12 +56,11 @@ from script.analyze_task_distances import (  # noqa: E402
     offdiag_summary,
     resolve_run_dir,
 )
-# LIBERO-specific constants + agent/dataset helpers.
-from script.visualize_latent_libero import (  # noqa: E402
-    LIBERO_GOAL_10,
-    TASK_FAMILY_MAP,
+# Robocasa-specific constants + agent/dataset helpers.
+from script.visualize_latent_robocasa import (  # noqa: E402
     FAMILY_ORDER,
     FAMILY_COLORS,
+    family_of,
     build_agent_and_pretrain_dataset,
     encode_latents,
     _resolve_stats_path,
@@ -65,19 +68,23 @@ from script.visualize_latent_libero import (  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
-# LIBERO-specific stratified ranges + family-aware plotting.
+# atomic_65 stratified ranges + family-aware plotting.
 # ---------------------------------------------------------------------------
 
 def build_task_ranges(stats_path: str, dataset_len: int) -> list[tuple[str, int, int]]:
-    """Return [(instruction, start, end_exclusive)] for instructions in the prefix."""
+    """Return [(task, start, end_exclusive)] for tasks present in the prefix.
+
+    Iterates tasks in the stats file's own (insertion) order, which matches the
+    order tasks were concatenated into the HDF5 — works for the full 65-atomic
+    pool, not just ATOMIC_SEEN_18. Trailing tasks beyond ``dataset_len`` are
+    clamped/dropped.
+    """
     with open(stats_path) as f:
         stats = json.load(f)
     task_T = stats["tasks"]
     ranges: list[tuple[str, int, int]] = []
     cur = 0
-    for t in LIBERO_GOAL_10:
-        if t not in task_T:
-            continue
+    for t in task_T:
         n = int(task_T[t]["train_T"])
         start = cur
         end = min(cur + n, dataset_len)
@@ -93,7 +100,7 @@ def order_by_family(present: list[str]) -> list[int]:
     fam_rank = {f: i for i, f in enumerate(FAMILY_ORDER)}
     return sorted(
         range(len(present)),
-        key=lambda i: (fam_rank.get(TASK_FAMILY_MAP.get(present[i], "Other"), 99), present[i]),
+        key=lambda i: (fam_rank.get(family_of(present[i]), 99), present[i]),
     )
 
 
@@ -106,9 +113,9 @@ def save_heatmap(mat, present, order, out_path, *, title):
     im = ax.imshow(m, cmap="viridis", vmin=0.0, vmax=vmax)
     ax.set_xticks(range(n))
     ax.set_yticks(range(n))
-    fam_color = lambda t: FAMILY_COLORS.get(TASK_FAMILY_MAP.get(t, "Other"), "black")
-    ax.set_xticklabels(tasks, rotation=90, fontsize=7)
-    ax.set_yticklabels(tasks, fontsize=7)
+    fam_color = lambda t: FAMILY_COLORS.get(family_of(t), "black")
+    ax.set_xticklabels(tasks, rotation=90, fontsize=6)
+    ax.set_yticklabels(tasks, fontsize=6)
     for lbl, t in zip(ax.get_xticklabels(), tasks):
         lbl.set_color(fam_color(t))
     for lbl, t in zip(ax.get_yticklabels(), tasks):
@@ -117,7 +124,7 @@ def save_heatmap(mat, present, order, out_path, *, title):
     for i in range(n):
         for j in range(n):
             ax.text(j, i, f"{m[i, j]:.2f}", ha="center", va="center",
-                    fontsize=5.5, color="white" if m[i, j] < thresh else "black")
+                    fontsize=4.0, color="white" if m[i, j] < thresh else "black")
     fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     ax.set_title(title, fontsize=11)
     fig.tight_layout()
@@ -131,17 +138,17 @@ def save_mds_2d(mat, present, out_path, *, title, seed):
               n_init=8, max_iter=500, normalized_stress=False)
     coords = mds.fit_transform(mat)
 
-    fig, ax = plt.subplots(figsize=(9, 8))
+    fig, ax = plt.subplots(figsize=(11, 10))
     seen_fams: set[str] = set()
     for i, t in enumerate(present):
-        fam = TASK_FAMILY_MAP.get(t, "Other")
+        fam = family_of(t)
         color = FAMILY_COLORS.get(fam, "black")
         ax.scatter(coords[i, 0], coords[i, 1], s=90, color=color, alpha=0.85,
                    edgecolors="black", linewidths=0.5,
                    label=fam if fam not in seen_fams else None)
         seen_fams.add(fam)
         ax.annotate(t, (coords[i, 0], coords[i, 1]),
-                    textcoords="offset points", xytext=(5, 4), fontsize=7.0)
+                    textcoords="offset points", xytext=(5, 4), fontsize=6.0)
     ax.set_xlabel("MDS 1")
     ax.set_ylabel("MDS 2")
     ax.set_title(f"{title}\nMDS 2D embedding (stress={mds.stress_:.2f})", fontsize=11)
@@ -150,7 +157,7 @@ def save_mds_2d(mat, present, out_path, *, title, seed):
     order_leg = [labels.index(f) for f in FAMILY_ORDER if f in labels]
     ax.legend([handles[i] for i in order_leg], [labels[i] for i in order_leg],
               loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=9,
-              title="instruction family")
+              title="motion family")
     fig.tight_layout()
     fig.savefig(out_path, dpi=140, bbox_inches="tight")
     plt.close(fig)
@@ -158,7 +165,7 @@ def save_mds_2d(mat, present, out_path, *, title, seed):
 
 
 # ---------------------------------------------------------------------------
-# Main (mirrors analyze_task_distances.main with LIBERO constants).
+# Main (mirrors analyze_task_distances.main with the 65-task ranges).
 # ---------------------------------------------------------------------------
 
 def main() -> None:
@@ -177,7 +184,7 @@ def main() -> None:
                         choices=["euclidean", "mahalanobis", "cosine", "all"])
     parser.add_argument("--ellipse_std", type=float, default=2.0)
     parser.add_argument("--scatter_max_per_task", type=int, default=800)
-    parser.add_argument("--libero_dir", type=str, default="")
+    parser.add_argument("--robocasa_dir", type=str, default="")
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
@@ -185,9 +192,9 @@ def main() -> None:
     with (run_dir / "flags.json").open() as f:
         flags = json.load(f)
     env_name = flags.get("env_name", "")
-    if not env_name.startswith("libero_"):
+    if not env_name.startswith("robocasa_"):
         raise SystemExit(
-            f"env_name={env_name!r} is not libero_*; task labels unavailable.")
+            f"env_name={env_name!r} is not robocasa_*; task labels unavailable.")
 
     print("Building agent + pretrain dataset ...")
     agent, pre_train, raw_obs = build_agent_and_pretrain_dataset(flags)
@@ -205,11 +212,11 @@ def main() -> None:
         epoch = None
         print(f"space={args.space}: skipping checkpoint restore (raw feature baseline).")
 
-    stats_path = _resolve_stats_path(env_name, args.libero_dir)
+    stats_path = _resolve_stats_path(env_name, args.robocasa_dir)
     ranges = build_task_ranges(stats_path, dataset_len)
     idxs, owner, present = stratified_idxs(ranges, args.per_task, args.seed)
     counts = {present[ti]: int((owner == ti).sum()) for ti in range(len(present))}
-    print(f"Instructions present: {len(present)}/10.  per-task counts: {counts}")
+    print(f"Tasks present: {len(present)}.  per-task counts: {counts}")
     print(f"Total transitions sampled: {len(idxs)}")
 
     print(f"Extracting features (space={args.space}, source={args.source}) ...")
@@ -223,8 +230,8 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     metric_titles = {
-        "euclidean": "Euclidean distance between instruction centroids",
-        "cosine": "Cosine distance (1 - cos sim) between instruction centroids",
+        "euclidean": "Euclidean distance between task centroids",
+        "cosine": "Cosine distance (1 - cos sim) between task centroids",
         "mahalanobis": "Mahalanobis distance (pooled within-task cov)",
     }
     space_tag = args.space if args.space != "latent" else f"latent.{args.source}"
@@ -266,7 +273,7 @@ def main() -> None:
             out_path = out_dir / f"scatter2d_{emb}_{metric}{suffix}.png"
             fisher = save_scatter_2d(
                 coords, owner, present, out_path,
-                title=(f"Per-sample distribution per instruction — {metric} geometry\n"
+                title=(f"Per-sample distribution per task — {metric} geometry\n"
                        f"{env_name}  [{space_tag}]"),
                 info=info, n_std=args.ellipse_std,
                 max_per_task=args.scatter_max_per_task, seed=args.seed,

@@ -323,9 +323,10 @@ def save_mds_2d(mat, present, out_path, *, title, seed):
     handles, labels = ax.get_legend_handles_labels()
     order_leg = [labels.index(f) for f in FAMILY_ORDER if f in labels]
     ax.legend([handles[i] for i in order_leg], [labels[i] for i in order_leg],
-              loc="best", fontsize=9, title="motion family")
+              loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=9,
+              title="motion family")
     fig.tight_layout()
-    fig.savefig(out_path, dpi=140)
+    fig.savefig(out_path, dpi=140, bbox_inches="tight")
     plt.close(fig)
     return float(mds.stress_)
 
@@ -400,9 +401,14 @@ def save_scatter_2d(coords, owner, present, out_path, *, title, info,
         ax.annotate(t, (c[0], c[1]), textcoords="offset points", xytext=(6, 4),
                     fontsize=7.5, zorder=6)
 
-    ax.legend(loc="upper right", fontsize=6.5, framealpha=0.9, ncol=1,
-              markerscale=0.6, title="task", title_fontsize=7, borderpad=0.6,
-              labelspacing=0.3)
+    # Legend outside the axes (to the right) so it never covers the point cloud.
+    # Always a single tall column: a multi-column legend for many tasks (e.g. the
+    # 65-atomic pool) grows wider than the plot itself and wrecks the proportions,
+    # whereas one tall column stays roughly as tall as the axes.
+    ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=6.5,
+              framealpha=0.9, ncol=1, markerscale=0.6, title="task",
+              title_fontsize=7, borderpad=0.6, labelspacing=0.3,
+              handletextpad=0.4)
 
     method = info["method"].upper()
     evr = info.get("evr_2d")
@@ -416,7 +422,8 @@ def save_scatter_2d(coords, owner, present, out_path, *, title, info,
                  f"(ellipse = {n_std:g}σ)", fontsize=11)
     ax.grid(True, alpha=0.3)
     fig.tight_layout()
-    fig.savefig(out_path, dpi=140)
+    # bbox_inches="tight" expands the saved canvas to include the outside legend.
+    fig.savefig(out_path, dpi=140, bbox_inches="tight")
     plt.close(fig)
     return float(fisher)
 

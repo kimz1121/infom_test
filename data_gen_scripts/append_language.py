@@ -57,27 +57,28 @@ def main():
     emb = {k: np.asarray(v, dtype=np.float32) for k, v in lang["embeddings"].items()}
     dim = lang["dim"]
 
-    with h5py.File(osp.expanduser(args.obs_hdf5), "r") as f:
-        data = {k: f[k][:] for k in f.keys()}
-    n = len(data["observations"])
-
-    if args.which == "composite":
-        if args.composite_task not in emb:
-            raise KeyError(f"{args.composite_task} not in language embeddings")
-        lang_rows = np.broadcast_to(emb[args.composite_task], (n, dim)).astype(np.float32)
-    else:
-        tasks = per_row_task(args.stats, n, args.which)
-        lang_rows = np.stack([emb[t] for t in tasks], axis=0).astype(np.float32)
-
-    data["observations"] = np.concatenate([data["observations"], lang_rows], axis=-1)
-    data["next_observations"] = np.concatenate([data["next_observations"], lang_rows], axis=-1)
-    print(f"obs {n} rows -> {data['observations'].shape[-1]}-d (appended {dim}-d language)")
-
+    in_path = osp.expanduser(args.obs_hdf5)
     out = osp.expanduser(args.out)
-    with h5py.File(out, "w") as f:
-        for k, v in data.items():
-            f.create_dataset(k, data=v, compression="gzip", compression_opts=4)
-    print(f"wrote {out}")
+    with h5py.File(in_path, "r") as fin:
+        n = fin["observations"].shape[0]
+        if args.which == "composite":
+            if args.composite_task not in emb:
+                raise KeyError(f"{args.composite_task} not in language embeddings")
+            lang_rows = np.broadcast_to(emb[args.composite_task], (n, dim)).astype(np.float32)
+        else:
+            tasks = per_row_task(args.stats, n, args.which)
+            lang_rows = np.stack([emb[t] for t in tasks], axis=0).astype(np.float32)
+
+        # Stream key-by-key so the two big (obs/next_obs) arrays never coexist:
+        # peak ~= one input + lang_rows + one output, instead of all of them at once.
+        with h5py.File(out, "w") as fout:
+            for k in fin.keys():
+                arr = fin[k][:]
+                if k in ("observations", "next_observations"):
+                    arr = np.concatenate([arr, lang_rows], axis=-1)
+                fout.create_dataset(k, data=arr, compression="gzip", compression_opts=4)
+                del arr
+    print(f"{n} rows: appended {dim}-d language -> wrote {out}")
 
 
 if __name__ == "__main__":

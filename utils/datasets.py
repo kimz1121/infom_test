@@ -126,26 +126,45 @@ class Dataset(FrozenDict):
             assert 'observations' in self
             assert 'next_observations' in self
 
-            observations = self['observations']
+            # Normalize the two large arrays IN PLACE. The previous version built
+            # a full-size temporary per array (and an extra unused normalized copy
+            # for the return), ~tripling peak RAM — enough to OOM on wide obs
+            # (e.g. 1936-d * 1.4M rows). Same values, float32 preserved.
+            self._normalize_inplace(self._dict['observations'])
+            self._normalize_inplace(self._dict['next_observations'])
+            return self._dict['observations']
 
-            self._dict['observations'] = self.normalize(
-                self['observations'], self.obs_mean, self.obs_var,
-                self.obs_max, self.obs_min,
-                self.obs_norm_type, self.epsilon
-            )
-            self._dict['next_observations'] = self.normalize(
-                self['next_observations'], self.obs_mean, self.obs_var,
-                self.obs_max, self.obs_min,
-                self.obs_norm_type, self.epsilon
-            )
-
-        observations = self.normalize(
+        return self.normalize(
             observations, self.obs_mean, self.obs_var,
             self.obs_max, self.obs_min,
             self.obs_norm_type, self.epsilon
         )
 
-        return observations
+    def _normalize_inplace(self, arr):
+        """In-place equivalent of normalize() for the stored obs arrays.
+
+        create(freeze=True) marks arrays read-only; they own their data, so we
+        flip writeable for the in-place update and re-freeze to keep the contract.
+        """
+        was_frozen = not arr.flags.writeable
+        if was_frozen:
+            arr.setflags(write=True)
+        try:
+            t = self.obs_norm_type
+            if t == 'normal':
+                arr -= self.obs_mean
+                arr /= np.sqrt(self.obs_var + self.epsilon)
+            elif t == 'bounded':
+                arr -= self.obs_min
+                arr *= 2.0 / (self.obs_max - self.obs_min)
+                arr -= 1.0
+            elif t == 'none':
+                pass
+            else:
+                raise TypeError("Unsupported normalizer type: {}".format(t))
+        finally:
+            if was_frozen:
+                arr.setflags(write=False)
 
     def get_random_idxs(self, num_idxs):
         """Return `num_idxs` random indices."""

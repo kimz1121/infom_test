@@ -45,6 +45,29 @@ except ImportError:
     umap = None
 
 from sklearn.manifold import TSNE  # noqa: E402
+from scipy.linalg import orthogonal_procrustes  # noqa: E402
+
+
+def _pca_ref2(B):
+    """Deterministic 2D reference = top-2 PCA of backdrop latents, fixed per-axis
+    sign. Identical across runs/demos, so aligning every video's embedding to it
+    pins the axis orientation (t-SNE/UMAP have no canonical orientation)."""
+    Bc = B - B.mean(0)
+    _, _, vt = np.linalg.svd(Bc, full_matrices=False)
+    ref = Bc @ vt[:2].T
+    for k in range(2):
+        if np.mean(ref[:, k] ** 3) < 0:
+            ref[:, k] *= -1.0
+    return ref
+
+
+def _align_to_ref(emb_atomic, emb_comp, ref2):
+    """Orthogonal-Procrustes align backdrop to ref2 (rotation+reflection), same
+    transform applied to the demo trajectory."""
+    mu = emb_atomic.mean(0)
+    A = emb_atomic - mu
+    R, _ = orthogonal_procrustes(A, ref2 - ref2.mean(0))
+    return A @ R, (emb_comp - mu) @ R
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -72,18 +95,22 @@ from utils.flax_utils import restore_agent  # noqa: E402
 # Video discovery + decoding.
 # ---------------------------------------------------------------------------
 
-def composite_task_name_from_basename(composite_basename: str) -> str:
-    """e.g. 'startelectrickettle_state' -> 'StartElectricKettle'.
+def composite_task_name_from_basename(composite_basename: str, category: str = "composite") -> str:
+    """e.g. 'startelectrickettle_state' -> 'StartElectricKettle',
+    'atomic_OpenDrawer_3cam' -> 'OpenDrawer'.
 
-    Resolves against real folder names under ~/.robocasa/raw/pretrain/composite/
+    Resolves against real folder names under ~/.robocasa/raw/pretrain/<category>/
     (case-insensitive) so we don't have to hardcode camel-case.
     """
     base = composite_basename
-    for suffix in ("_multimodal", "_lang", "_state", "_image"):
+    for suffix in ("_3cam_lang", "_3cam_state", "_3cam", "_multimodal",
+                   "_lang", "_state", "_image"):
         if base.endswith(suffix):
             base = base[: -len(suffix)]
             break
-    raw_dir = osp.expanduser("~/.robocasa/raw/pretrain/composite")
+    if base.startswith(category + "_"):   # e.g. 'atomic_OpenDrawer' -> 'OpenDrawer'
+        base = base[len(category) + 1:]
+    raw_dir = osp.expanduser(f"~/.robocasa/raw/pretrain/{category}")
     if osp.isdir(raw_dir):
         for entry in os.listdir(raw_dir):
             if entry.lower() == base.lower():
@@ -91,9 +118,10 @@ def composite_task_name_from_basename(composite_basename: str) -> str:
     return base
 
 
-def find_composite_mp4(task_name: str, episode: int, camera: str) -> str:
+def find_composite_mp4(task_name: str, episode: int, camera: str,
+                       category: str = "composite") -> str:
     pattern = osp.expanduser(
-        f"~/.robocasa/raw/pretrain/composite/{task_name}/*/lerobot/"
+        f"~/.robocasa/raw/pretrain/{category}/{task_name}/*/lerobot/"
         f"videos/chunk-*/observation.images.{camera}/episode_{episode:06d}.mp4"
     )
     matches = sorted(glob.glob(pattern))
@@ -202,18 +230,24 @@ def prepare_data(args):
         embeddings["umap"] = (umap_atomic, umap_comp)
 
     if "tsne" in methods:
-        # t-SNE has no .transform(); fit jointly on (atomic_plot ⊕ composite)
-        # and split. Atomic cluster *structure* is preserved but absolute coords
-        # differ from a UMAP run.
-        print(f"Fitting joint t-SNE on {len(a_mean_plot) + T} latents ...")
-        z_joint = np.concatenate([a_mean_plot, comp_mean], axis=0)
-        perp = min(30.0, max(5.0, (len(z_joint) - 1) / 3.0))
-        tsne_model = TSNE(n_components=2, perplexity=perp, max_iter=1000,
-                          init="pca", learning_rate="auto",
-                          random_state=args.seed, metric="euclidean")
-        tsne_joint = tsne_model.fit_transform(z_joint)
-        embeddings["tsne"] = (tsne_joint[: len(a_mean_plot)],
-                              tsne_joint[len(a_mean_plot):])
+        # Fit t-SNE on the backdrop ONLY (deterministic given fixed backdrop+seed
+        # -> identical layout across videos), place the demo by kNN-interpolation
+        # in that layout (t-SNE has no .transform). A per-demo joint refit instead
+        # silently flips/rotates the backdrop between videos.
+        print(f"Fitting t-SNE on {len(a_mean_plot)} backdrop latents ...")
+        perp = min(30.0, max(5.0, (len(a_mean_plot) - 1) / 3.0))
+        tsne_bd = TSNE(n_components=2, perplexity=perp, max_iter=1000,
+                       init="pca", learning_rate="auto",
+                       random_state=args.seed, metric="euclidean").fit_transform(a_mean_plot)
+        from sklearn.neighbors import NearestNeighbors
+        _, nidx = NearestNeighbors(n_neighbors=10).fit(a_mean_plot).kneighbors(comp_mean)
+        embeddings["tsne"] = (tsne_bd, tsne_bd[nidx].mean(axis=1))
+
+    # Pin every video to a shared deterministic orientation (backdrop PCA frame)
+    # so embedding axes never flip/rotate between demos/runs.
+    ref2 = _pca_ref2(a_mean_plot)
+    for k, (ea, ec) in list(embeddings.items()):
+        embeddings[k] = _align_to_ref(ea, ec, ref2)
 
     return dict(
         run_dir=run_dir, epoch=epoch,
@@ -294,7 +328,7 @@ def render_video(data: dict, video_frames: np.ndarray, out_path: Path, *,
                  emb_atomic: np.ndarray, emb_comp: np.ndarray,
                  embedding_name: str,
                  fps: int = 20, title: str = "", subtitle: str = "",
-                 max_T: int = 0, min_seg_frac: float = 0.03):
+                 max_T: int = 0, min_seg_frac: float = 0.03, conf=None):
     T = data["T"]
     n_frames = T if max_T <= 0 else min(T, max_T)
     if len(video_frames) < T:
@@ -310,18 +344,28 @@ def render_video(data: dict, video_frames: np.ndarray, out_path: Path, *,
     # --- figure layout ---
     # Nested gridspecs so strip + diagonal labels can be flush (hspace=0) while
     # the top row (video+embed) and bottom row (legend) keep normal spacing.
-    fig = plt.figure(figsize=(15, 11.0), constrained_layout=False)
-    outer = fig.add_gridspec(
-        3, 1, height_ratios=[7.0, 2.6, 1.0],
-        left=0.04, right=0.985, top=0.905, bottom=0.05, hspace=0.18,
-    )
+    has_conf = conf is not None
+    fig = plt.figure(figsize=(15, 12.0 if has_conf else 11.0), constrained_layout=False)
+    if has_conf:
+        outer = fig.add_gridspec(
+            4, 1, height_ratios=[7.0, 2.6, 1.3, 1.0],
+            left=0.04, right=0.985, top=0.905, bottom=0.05, hspace=0.30,
+        )
+        leg_row = 3
+    else:
+        outer = fig.add_gridspec(
+            3, 1, height_ratios=[7.0, 2.6, 1.0],
+            left=0.04, right=0.985, top=0.905, bottom=0.05, hspace=0.18,
+        )
+        leg_row = 2
     top = outer[0].subgridspec(1, 2, width_ratios=[1.0, 1.2], wspace=0.12)
     mid = outer[1].subgridspec(2, 1, height_ratios=[0.5, 2.1], hspace=0.0)
     ax_vid = fig.add_subplot(top[0, 0])
     ax_emb = fig.add_subplot(top[0, 1])
     ax_strip = fig.add_subplot(mid[0, 0])
     ax_lbl = fig.add_subplot(mid[1, 0])
-    ax_leg = fig.add_subplot(outer[2])
+    ax_conf = fig.add_subplot(outer[2]) if has_conf else None
+    ax_leg = fig.add_subplot(outer[leg_row])
 
     # Big main title + smaller gray subtitle. Splitting prevents the single
     # long line from overflowing the figure width at fontsize=20.
@@ -380,6 +424,28 @@ def render_video(data: dict, video_frames: np.ndarray, out_path: Path, *,
 
     _draw_diagonal_labels(ax_lbl, voted, color_map, min_seg_frac=min_seg_frac)
 
+    # Optional: KNN-vote-confidence curve over time (frac of k neighbours agreeing).
+    conf_vline = conf_dot = None
+    if has_conf:
+        conf = np.asarray(conf, dtype=float)
+        tt = np.arange(len(conf))
+        ax_conf.plot(tt, conf, color="tab:purple", lw=1.6, zorder=5)
+        ax_conf.fill_between(tt, 0, conf, color="tab:purple", alpha=0.12, zorder=4)
+        ax_conf.axhline(float(conf.mean()), color="gray", lw=1.0, ls="--", zorder=3,
+                        label=f"mean={conf.mean():.2f}")
+        ax_conf.set_xlim(-0.5, len(conf) - 0.5)
+        ax_conf.set_ylim(0.0, 1.02)
+        ax_conf.set_ylabel("KNN conf", fontsize=12)
+        ax_conf.set_title("KNN vote confidence per timestep  (fraction of k neighbours agreeing)",
+                          fontsize=14, pad=4)
+        ax_conf.set_xlabel("timestep", fontsize=11)
+        ax_conf.tick_params(labelsize=9)
+        ax_conf.grid(True, alpha=0.25)
+        ax_conf.legend(loc="lower right", fontsize=10, framealpha=0.85)
+        conf_vline = ax_conf.axvline(0, color="black", lw=1.6, zorder=10)
+        conf_dot = ax_conf.scatter([0], [conf[0]], s=90, c="yellow",
+                                   edgecolors="black", linewidths=1.4, zorder=11)
+
     # Focused legend with present atomic tasks (sorted by duration). Numbers
     # carry an explicit unit ("steps") so the count isn't ambiguous.
     ax_leg.axis("off")
@@ -415,6 +481,9 @@ def render_video(data: dict, video_frames: np.ndarray, out_path: Path, *,
             cur_pt.set_offsets(emb_comp[t: t + 1])
             strip_vline.set_xdata([t, t])
             strip_vline2.set_xdata([t, t])
+            if has_conf:
+                conf_vline.set_xdata([t, t])
+                conf_dot.set_offsets([[t, conf[t]]])
             writer.grab_frame()
     plt.close(fig)
     print(f"Saved → {out_path}")
@@ -425,6 +494,9 @@ def main():
     parser.add_argument("--run_dir", default=None)
     parser.add_argument("--epoch", type=int, default=None)
     parser.add_argument("--composite_name", default="startelectrickettle_state")
+    parser.add_argument("--category", default="composite", choices=["composite", "atomic"],
+                        help="Raw video category for the demo frames (mp4 path + task-name "
+                             "resolution). 'atomic' renders a single atomic-task episode demo.")
     parser.add_argument("--robocasa_dir", default="~/.robocasa/data")
     parser.add_argument("--episode", type=int, default=0)
     parser.add_argument("--camera", default="robot0_agentview_left",
@@ -448,8 +520,8 @@ def main():
     data = prepare_data(args)
 
     # Locate + decode the matching mp4.
-    task_name = composite_task_name_from_basename(args.composite_name)
-    mp4 = find_composite_mp4(task_name, args.episode, args.camera)
+    task_name = composite_task_name_from_basename(args.composite_name, args.category)
+    mp4 = find_composite_mp4(task_name, args.episode, args.camera, args.category)
     print(f"Decoding video: {mp4}")
     frames = decode_all_frames(mp4)
     print(f"  {len(frames)} frames @ {frames.shape[1]}x{frames.shape[2]}")
@@ -470,7 +542,8 @@ def main():
                      emb_atomic=emb_atomic, emb_comp=emb_comp,
                      embedding_name=method.upper(),
                      fps=args.fps, title=main_title, subtitle=subtitle,
-                     max_T=args.max_T, min_seg_frac=args.min_seg_frac)
+                     max_T=args.max_T, min_seg_frac=args.min_seg_frac,
+                     conf=data["conf"])
 
 
 if __name__ == "__main__":
