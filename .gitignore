@@ -12,3 +12,4 @@ submitit/
 .env
 
 exp/**/*
+figures/**/*
