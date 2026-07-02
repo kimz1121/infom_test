@@ -1,0 +1,144 @@
+\documentclass[11pt]{article}
+
+% ============================================================
+%  Single-file research proposal.
+%  Compile:  pdflatex proposal_single.tex   (run twice for refs)
+%  Korean support: uncomment \usepackage{kotex} and compile with
+%  XeLaTeX or LuaLaTeX instead.
+% ============================================================
+
+% \usepackage{kotex}                 % <- uncomment for Korean (XeLaTeX/LuaLaTeX)
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{graphicx}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+
+\title{Task Self-Awareness for Vision-Language-Action Models:\\
+       An Explicit, Verifiable Task-Embedding Approach}
+\author{Author Names}        % TODO: fill in
+\date{}
+
+\begin{document}
+\maketitle
+
+% ===== Abstract =====
+% NOTE (structure): this abstract commits to a convex-cone / set-membership
+% method, while the Introduction and Related Work deliberately leave the
+% embedding geometry open. Pick one framing before submission.
+\begin{abstract}
+Recent advances in robot action generation policies have enabled robots to perform real-world tasks such as cooking simple dishes and folding clothes. However, their performance degrades significantly as tasks become longer and more complex. To address this limitation, recent studies have explored augmenting policies with subtask information to improve action generation in long-horizon settings. However, existing methods formulate subtask representation as a multi-category classification problem, which inherently suffers from forced classification---the requirement to assign every input to exactly one class, even when the input is ambiguous or belongs to none of the predefined subtasks. In this proposal, we reformulate subtask representation as a set-membership classification problem based on convex cone representation. The convex cone formulation enables sample-based definition of subtask regions in high-dimensional latent space while remaining computationally efficient. Its explicit set boundaries allow ambiguous inputs to be naturally identified as non-members, thereby mitigating forced classification errors. By leveraging the refined subtask information, the policy is expected to learn more effectively, leading to improved action generation performance on long-horizon and compositional robot manipulation tasks.
+\end{abstract}
+
+% ===== Introduction =====
+\section{Introduction}
+\label{sec:intro}
+
+Recent advances in robot action generation policies have been remarkably rapid, particularly since the introduction of Vision-Language-Action (VLA) models, which have significantly improved both perception and task understanding. The VLA architecture leverages the powerful capabilities of Vision-Language Model (VLM) backbones: internet-scale knowledge and sophisticated reasoning enable robots to generalize task reasoning even to unseen tasks encountered outside the training distribution. Domains once considered beyond the reach of robotic intelligence---such as cloth folding, simple cooking, and coffee preparation---are now being rapidly conquered by general-purpose VLA systems~\cite{openvla, pi0}.
+
+However, the VLA architecture still leaves substantial room for improvement. While early VLA proposals appeared highly generalizable, subsequent studies have revealed that simply combining a VLM backbone with an action expert (e.g., Diffusion or ACT heads)~\cite{diffusionpolicy, act} is insufficient to fully exploit the backbone's reasoning capabilities for robotic tasks~\cite{liberoplus}. The knowledge and reasoning embedded in VLMs are powerful but were trained for the language domain rather than the robot motion domain. As a result, current VLA models exhibit a clear limitation: they fail to adequately leverage VLM backbones for robot motion generation.
+
+From the current perspective, the reasons why VLAs fall short of being truly general policies are diverse. In this proposal, we focus specifically on performance degradation caused by insufficient \emph{task understanding} in VLAs: robots often fail to grasp human intent, and at times execute motions unrelated to the user's command. This limitation has been reported in several recent studies. For instance, LIBERO-Plus~\cite{liberoplus} points out that state-of-the-art VLAs are highly sensitive to visual features but largely insensitive to language instruction features. Such misinterpretation of robotic tasks from vision and language inputs leads to characteristic failure modes: task confusion, looping behavior, and disregard for language instructions.
+
+Several approaches have been proposed to mitigate this issue, but each comes with notable drawbacks. \emph{Hierarchical planners} such as $\pi_{0.5}$~\cite{pi05} and Hi Robot~\cite{hirobot} introduce a high-level planning module on top of the low-level policy; however, these models are computationally heavy, and the VLM still passes task information to the lower-level policy in the form of natural language, leaving the downstream policy to interpret ambiguous linguistic descriptions. \emph{CoT-VLA}~\cite{cotvla} incorporates chain-of-thought reasoning into the VLA pipeline, but its contribution to disambiguating task identity is unclear, and it further inflates the model architecture. In short, existing remedies either rely on language-mediated task transfer---which preserves the original ambiguity---or substantially increase model complexity without directly addressing task identification.
+
+In this proposal, we propose a simpler and more direct approach. We introduce a dedicated module that produces a task embedding whose sole responsibility is to distinguish between task types. By passing task-related information to the action expert \emph{explicitly as an embedding} rather than implicitly through language tokens, our architecture removes the linguistic ambiguity bottleneck while remaining lightweight relative to hierarchical or chain-of-thought-based alternatives.
+
+We propose three experiments to validate our approach. First, we define the tendency of a model to misinterpret user intent---particularly under distributions that differ from training data---as \emph{task uncertainty}, and we will quantitatively measure this uncertainty in state-of-the-art VLA models. Second, we will evaluate the performance gains in action generation when the task embedding is provided, and compare our model against recent VLA baselines. Third, we will quantify and verify the extent to which the learned task embedding actually discriminates between tasks. Together, these experiments are designed to demonstrate the impact of a model's task understanding capability on its action generation performance. We detail this plan in Section~\ref{sec:experiments}.
+
+% ===== Related Work =====
+\section{Related Work}
+\label{sec:related}
+
+\subsection{The Rise of VLAs and the Emergence of a Task-Understanding Bottleneck}
+
+Vision-Language-Action models (VLAs) have rapidly become the dominant architectural paradigm for general-purpose robot policies. Building on large vision-language backbones, recent systems such as OpenVLA~\cite{openvla} and $\pi_0$~\cite{pi0} demonstrate that a single model, trained on diverse manipulation data, can map raw visual observations and free-form language instructions to low-level actions across a wide range of embodiments and tasks. Their success has been propelled in parallel by advances in the action-generation component itself: diffusion-based action heads~\cite{diffusionpolicy} and transformer-based action chunking policies such as ACT~\cite{act} have made it possible to produce smooth, high-frequency trajectories conditioned on rich multimodal features. A small body of earlier work also foreshadowed the importance of structured task conditioning---RT-H~\cite{rth} decomposes instructions into intermediate language motions, and BAKU~\cite{baku} introduces multi-task action representations---hinting that \emph{how} task information is supplied to the policy is itself a design lever. Despite these advances, recent benchmarking efforts have surfaced a structural limitation that earlier evaluations had largely concealed. In particular, LIBERO-Plus~\cite{liberoplus} shows that state-of-the-art VLAs are disproportionately sensitive to visual features while remaining largely insensitive to the language instruction, producing characteristic failure modes such as task confusion, looping behavior, and disregard for explicit user intent. This finding has elevated \emph{task understanding}---a model's ability to identify which task it is actually executing---from an implicit assumption to an open research agenda.
+
+\subsection{Existing Approaches to Task Information and Their Common Bottleneck}
+
+Recent work attempting to address this bottleneck can be organized into two broad families, distinguished by the \emph{channel} through which task information is conveyed to the action policy. The first family---\emph{language-mediated task transfer}---introduces a high-level reasoning module above the low-level policy but preserves natural language as the medium of communication between layers. Hierarchical systems such as $\pi_{0.5}$~\cite{pi05} and Hi Robot~\cite{hirobot} employ an upper VLM to plan or rephrase instructions, which are then passed to a downstream policy as linguistic tokens. While this decomposition improves long-horizon coherence, the ambiguity inherent to natural language is preserved within the channel itself: an instruction such as ``pick up the cup'' leaves the downstream policy to resolve, on its own, \emph{which} cup is meant and \emph{what} manipulation strategy is implied. The second family---\emph{implicit reasoning chains}---instead attempts to internalize task reasoning within the model's autoregressive trace. CoT-VLA~\cite{cotvla} interleaves chain-of-thought reasoning with action prediction, encouraging the model to deliberate before acting. However, task identity in this approach is distributed across the reasoning trace rather than localized in any inspectable representation, which inflates model complexity and makes it difficult to diagnose whether a failure stems from misidentifying the task or from misexecuting it. Across both families, a common limitation persists: \emph{task identity is never instantiated as a separable, verifiable representation}. It is either diluted by linguistic ambiguity or scattered across an implicit reasoning process, leaving the question of ``does the model know which task it is doing?'' empirically inaccessible.
+
+\subsection{Research Gap and Contributions}
+
+A small number of works have approached adjacent problems but stop short of treating task identity itself as a first-class, measurable representation. KnowNo~\cite{knowno} models \emph{task uncertainty} at the level of instruction interpretation, asking the policy to defer to a human when its confidence is low, but it does not provide the policy with an internal mechanism for resolving ambiguity. Representation-learning approaches such as RS-CL~\cite{rscl} learn task-discriminative embeddings via contrastive objectives in narrower settings, yet they have not been integrated into modern VLA pipelines as an explicit input to the action expert, nor evaluated under the lens of task-discrimination quality. Multi-task embeddings appearing in works such as BAKU~\cite{baku} are likewise byproducts of multi-task training rather than dedicated modules whose explicit goal is to disambiguate the current task. To our knowledge, no prior work treats \emph{task self-awareness}---the model's ability to internally represent and distinguish the task it is currently executing---as a stand-alone architectural component that can be measured, validated, and supplied directly to a VLA action expert. The present work addresses this gap with three contributions. \textbf{(i) Conceptually}, we formalize the performance degradation observed in state-of-the-art VLAs as \emph{task uncertainty}, an operationally measurable quantity, and demonstrate it on current SOTA systems. \textbf{(ii) Architecturally}, we introduce a dedicated task-embedding module that supplies task identity to the action expert as an explicit, low-dimensional representation, bypassing both the linguistic-ambiguity bottleneck of hierarchical planners and the diffuse-reasoning bottleneck of chain-of-thought VLAs. \textbf{(iii) Methodologically}, we leave the internal geometry of the embedding space (e.g., point-wise, clustered, or convex-cone-structured) as an open design axis, and instead establish---as the contribution of this work---that an explicit, separable task representation is \emph{both attainable and effective}. These three contributions correspond directly to the three experiments introduced in Section~\ref{sec:intro}: quantifying task uncertainty in existing VLAs, measuring the policy-performance gains from explicit task embeddings, and verifying the task-discriminative quality of the learned representation.
+
+% ===== Proposed Approach (Method) =====
+% IMPORTANT: The body text of the original 03_method.tex could not be recovered
+% from the project history, so the technical core below is a placeholder. Paste
+% the method .tex here verbatim; citations/refs will resolve against the
+% bibliography at the end of this file.
+%
+% Open decision (see Abstract / Related Work 2.3):
+%   - Abstract commits to a CONVEX-CONE / set-membership formulation.
+%   - Related Work (contribution iii) leaves the embedding geometry OPEN.
+%   Commit to one and keep it consistent with the Abstract.
+\section{Proposed Approach}
+\label{sec:method}
+
+We propose to equip the VLA action expert with a dedicated \emph{task-embedding module} whose sole responsibility is to represent and distinguish the task currently being executed. Rather than routing task information through natural language tokens---as hierarchical planners do---or diffusing it across an autoregressive reasoning trace---as chain-of-thought VLAs do---the module supplies task identity to the action expert as an explicit, low-dimensional embedding. This keeps the architecture lightweight while making task identity a separable, inspectable quantity.
+
+% --- TODO: insert original 03_method.tex body here ---
+% The method section should specify:
+%   (1) Module architecture: how the task embedding is produced and where it is
+%       injected into the action expert.
+%   (2) The embedding-space formulation. If following the Abstract, this is the
+%       convex-cone / set-membership construction: sample-based definition of
+%       subtask regions in latent space, with explicit set boundaries so that
+%       ambiguous inputs are identified as non-members.
+%   (3) Training objective(s) for the embedding and for the joint policy.
+%   (4) Any inference-time use of set membership (e.g., abstaining on
+%       out-of-set inputs).
+
+\medskip
+\noindent\textit{[Method body to be inserted from \texttt{03\_method.tex}.]}
+
+% ===== Proposed Experiments and Expected Outcomes =====
+\section{Proposed Experiments and Expected Outcomes}
+\label{sec:experiments}
+
+We propose three experiments, each targeting one of the contributions in Section~\ref{sec:related} and each producing a measurable quantity rather than a qualitative observation.
+
+\subsection{Experiment 1: Quantifying Task Uncertainty in Existing VLAs}
+
+We first operationalize \emph{task uncertainty} as the tendency of a policy to misinterpret user intent, especially under distributions that differ from its training data. We will measure this quantity on current state-of-the-art VLA systems, using inputs that probe sensitivity to the language instruction relative to visual features. The expected outcome is a quantitative confirmation---on SOTA models---of the task-understanding bottleneck reported qualitatively by LIBERO-Plus~\cite{liberoplus}, establishing a baseline against which our module can be compared.
+
+\subsection{Experiment 2: Policy-Performance Gains from an Explicit Task Embedding}
+
+We will integrate the proposed task-embedding module into a VLA pipeline and measure action-generation performance with and without the embedding, comparing against recent VLA baselines on long-horizon and compositional manipulation tasks. The expected outcome is that supplying task identity explicitly---rather than through language tokens or implicit reasoning---improves action generation, isolating the contribution of task understanding to downstream performance.
+
+\subsection{Experiment 3: Verifying the Task-Discriminative Quality of the Representation}
+
+Finally, we will quantify the extent to which the learned embedding actually separates tasks, using a task-discrimination metric over the embedding space. The expected outcome is evidence that an explicit, separable task representation is both attainable and effective---validating the representation directly, independently of end-task success, and confirming that performance gains in Experiment~2 stem from improved task identification rather than confounding factors.
+
+\medskip
+\noindent Together, these experiments are designed to demonstrate the impact of a model's task-understanding capability on its action-generation performance, and to validate the task-embedding module as a lightweight, verifiable alternative to language-mediated and chain-of-thought approaches.
+
+% ===== References (embedded; no external .bib needed) =====
+\begin{thebibliography}{99}
+
+\bibitem{openvla} M. J. Kim et al. \emph{OpenVLA: An Open-Source Vision-Language-Action Model.} Conference on Robot Learning (CoRL), 2024. arXiv:2406.09246.
+
+\bibitem{pi0} K. Black et al. \emph{$\pi_0$: A Vision-Language-Action Flow Model for General Robot Control.} arXiv:2410.24164, 2024.
+
+\bibitem{diffusionpolicy} C. Chi et al. \emph{Diffusion Policy: Visuomotor Policy Learning via Action Diffusion.} Robotics: Science and Systems (RSS), 2023. arXiv:2303.04137.
+
+\bibitem{act} T. Z. Zhao, V. Kumar, S. Levine, and C. Finn. \emph{Learning Fine-Grained Bimanual Manipulation with Low-Cost Hardware.} Robotics: Science and Systems (RSS), 2023. arXiv:2304.13705.
+
+\bibitem{rth} S. Belkhale et al. \emph{RT-H: Action Hierarchies Using Language.} arXiv:2403.01823, 2024.
+
+\bibitem{baku} S. Haldar, Z. Peng, and L. Pinto. \emph{BAKU: An Efficient Transformer for Multi-Task Policy Learning.} Advances in Neural Information Processing Systems (NeurIPS), 2024. arXiv:2406.07539.
+
+\bibitem{liberoplus} S. Fei et al. \emph{LIBERO-Plus: In-depth Robustness Analysis of Vision-Language-Action Models.} arXiv:2510.13626, 2025.
+
+\bibitem{pi05} Physical Intelligence et al. \emph{$\pi_{0.5}$: A Vision-Language-Action Model with Open-World Generalization.} arXiv:2504.16054, 2025.
+
+\bibitem{hirobot} L. X. Shi et al. \emph{Hi Robot: Open-Ended Instruction Following with Hierarchical Vision-Language-Action Models.} arXiv:2502.19417, 2025.
+
+\bibitem{cotvla} Q. Zhao et al. \emph{CoT-VLA: Visual Chain-of-Thought Reasoning for Vision-Language-Action Models.} IEEE/CVF Conference on Computer Vision and Pattern Recognition (CVPR), 2025. arXiv:2503.22020.
+
+\bibitem{knowno} A. Z. Ren et al. \emph{Robots That Ask For Help: Uncertainty Alignment for Large Language Model Planners.} Conference on Robot Learning (CoRL), 2023. arXiv:2307.01928.
+
+\bibitem{rscl} T. Kim et al. \emph{Contrastive Representation Regularization for Vision-Language-Action Models (RS-CL).} arXiv:2510.01711, 2025.
+
+\end{thebibliography}
+
+\end{document}

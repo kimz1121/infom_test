@@ -6,6 +6,7 @@ from agents.infom import InFOMAgent
 from agents.infom_multimodal import InFOMMultiModalAgent
 from agents.infom_state_decoder import InFOMStateDecoderAgent
 from agents.infom_lang_state_decoder import InFOMLangStateDecoderAgent
+from agents.infom_dino_attnpool import InFOMDinoAttnPoolAgent
 from agents.iql import IQLAgent
 from agents.mbpo_rebrac import MBPOReBRACAgent
 from agents.rebrac import ReBRACAgent
@@ -20,6 +21,7 @@ agents = dict(
     infom_multimodal=InFOMMultiModalAgent,
     infom_state_decoder=InFOMStateDecoderAgent,
     infom_lang_state_decoder=InFOMLangStateDecoderAgent,
+    infom_dino_attnpool=InFOMDinoAttnPoolAgent,
     iql=IQLAgent,
     mbpo_rebrac=MBPOReBRACAgent,
     rebrac=ReBRACAgent,

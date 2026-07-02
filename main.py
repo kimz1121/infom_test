@@ -86,9 +86,12 @@ def main(_):
     random.seed(FLAGS.seed)
     np.random.seed(FLAGS.seed)
 
-    # Set up datasets.
-    pretraining_train_dataset = Dataset.create(**pretraining_train_dataset)
-    if finetuning_train_dataset is not None:
+    # Set up datasets. Token (DINOv3) datasets are already streaming Dataset-like
+    # objects (not field dicts), so they pass through the Dataset.create() rebuild.
+    from utils.token_dataset import TokenDataset
+    if not isinstance(pretraining_train_dataset, TokenDataset):
+        pretraining_train_dataset = Dataset.create(**pretraining_train_dataset)
+    if finetuning_train_dataset is not None and not isinstance(finetuning_train_dataset, TokenDataset):
         finetuning_train_dataset = Dataset.create(**finetuning_train_dataset)
     if config['agent_name'] == 'mbpo_rebrac':
         # Create a separate replay buffer so that we can sample from both the training dataset and imaginary rollouts.
@@ -105,7 +108,7 @@ def main(_):
             dataset.inplace_aug = FLAGS.inplace_aug
             dataset.frame_stack = FLAGS.frame_stack
             if config['agent_name'] in ['infom', 'infom_multimodal', 'infom_state_decoder',
-                                        'infom_lang_state_decoder',
+                                        'infom_lang_state_decoder', 'infom_dino_attnpool',
                                         'rebrac', 'dino_rebrac', 'mbpo_rebrac',
                                         'td_infonce', 'fb_repr_fom', 'hilp_fom']:
                 dataset.return_next_actions = True

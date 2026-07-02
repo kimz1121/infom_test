@@ -262,15 +262,22 @@ def prepare_data(args):
 # Video rendering.
 # ---------------------------------------------------------------------------
 
-def _draw_atomic_static(ax, emb, labels, label_order, color_map):
+def _draw_atomic_static(ax, emb, labels, label_order, color_map, *,
+                        s=9, alpha=0.65):
     """Atomic backdrop — same high-contrast palette as the strip, vivid enough
-    that the cluster colors are unambiguously matchable to strip segments."""
+    that the cluster colors are unambiguously matchable to strip segments.
+
+    ``s``/``alpha`` default to the original values (robocasa/existing callers
+    unchanged); a dense backdrop (e.g. the full 60k pool) can pass smaller
+    values so the points don't merge into a blob that hides the trajectory."""
+    raster = labels.shape[0] > 8000   # keep the mp4 frames light when dense
     for c in label_order:
         m = labels == c
         if not m.any():
             continue
-        ax.scatter(emb[m, 0], emb[m, 1], s=9, alpha=0.65,
-                   color=color_map[c], edgecolors="none", zorder=1)
+        ax.scatter(emb[m, 0], emb[m, 1], s=s, alpha=alpha,
+                   color=color_map[c], edgecolors="none", zorder=1,
+                   rasterized=raster)
 
 
 def _setup_timeline_strip(ax_strip, voted, label_order, color_map):
@@ -328,7 +335,8 @@ def render_video(data: dict, video_frames: np.ndarray, out_path: Path, *,
                  emb_atomic: np.ndarray, emb_comp: np.ndarray,
                  embedding_name: str,
                  fps: int = 20, title: str = "", subtitle: str = "",
-                 max_T: int = 0, min_seg_frac: float = 0.03, conf=None):
+                 max_T: int = 0, min_seg_frac: float = 0.03, conf=None,
+                 backdrop_size: float = 9, backdrop_alpha: float = 0.65):
     T = data["T"]
     n_frames = T if max_T <= 0 else min(T, max_T)
     if len(video_frames) < T:
@@ -378,7 +386,8 @@ def render_video(data: dict, video_frames: np.ndarray, out_path: Path, *,
     ax_vid.set_title("robot demo (composite)", fontsize=16, pad=4)
     video_im = ax_vid.imshow(video_frames[0])
 
-    _draw_atomic_static(ax_emb, emb_atomic, atomic_labels, present_tasks, color_map)
+    _draw_atomic_static(ax_emb, emb_atomic, atomic_labels, present_tasks, color_map,
+                        s=backdrop_size, alpha=backdrop_alpha)
     ax_emb.set_title(f"{embedding_name} of intention-encoder latent",
                      fontsize=16, pad=4)
     ax_emb.set_xlabel(f"{embedding_name} 1", fontsize=11)

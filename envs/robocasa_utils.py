@@ -144,6 +144,20 @@ def make_env_and_datasets(env_name, frame_stack=None, action_clip_eps=1e-5,
     A proper robosuite-backed eval env can be plugged in later; for the
     smoke test we run pretraining/finetuning loss only (eval_interval=0).
     """
+    # DINOv3 token-grid datasets stream from a memmap and use the token loader
+    # instead of the flat HDF5 path (detected by a *_frame_tokens.f16 sibling).
+    from utils.token_dataset import is_token_dataset, load_token_dataset
+    pre_name, ft_name, _ = parse_env_name(env_name)
+    base = pre_name if reward_free else ft_name
+    if is_token_dataset(DEFAULT_DATASET_DIR, base):
+        train_dataset = load_token_dataset(
+            DEFAULT_DATASET_DIR, base, max_size=max_size, action_clip_eps=action_clip_eps)
+        val_base = f"{base}_val"
+        val_dataset = (load_token_dataset(DEFAULT_DATASET_DIR, val_base,
+                                          max_size=max_size, action_clip_eps=action_clip_eps)
+                       if is_token_dataset(DEFAULT_DATASET_DIR, val_base) else None)
+        return None, None, train_dataset, val_dataset
+
     train_dataset, val_dataset = get_dataset(
         env_name, reward_free=reward_free, max_size=max_size)
 

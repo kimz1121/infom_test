@@ -343,3 +343,57 @@ encoder_modules['precompute_state_mlp'] = functools.partial(
     image_feat_dim=512,
     state_hidden_dims=(128, 128),
 )
+
+
+class TokenAttnPoolEncoder(nn.Module):
+    """Learnable attention pool over PRECOMPUTED DINOv3 patch-token grids.
+
+    Observation layout (flat, from utils.token_dataset.TokenDataset):
+        [ tokens (n_cam*n_tok*feat_dim) | state (state_dim) | lang (lang_dim) ]
+
+    The frozen DINOv3 backbone already ran at precompute time; here we only learn
+    a small pool. Per camera (weights SHARED across cameras): ``num_layers`` of
+    pre-norm self-attention over the n_tok tokens, then a learned-query attention
+    pool that collapses the token set to one feat_dim vector. The pooled per-cam
+    vectors are concatenated with the raw state+lang tail and returned, so the
+    downstream IntentionEncoder/Value/Actor MLP consumes
+        n_cam*feat_dim + state_dim + lang_dim.
+    """
+
+    n_cam: int
+    n_tok: int
+    feat_dim: int
+    state_dim: int
+    lang_dim: int = 0
+    num_heads: int = 4
+    num_layers: int = 1
+    mlp_ratio: int = 2
+    layer_norm: bool = True
+
+    @nn.compact
+    def __call__(self, observations, train=True):
+        token_dim = self.n_cam * self.n_tok * self.feat_dim
+        lead = observations.shape[:-1]                    # supports (B,) and (K,B,)
+        tokens = observations[..., :token_dim]
+        rest = observations[..., token_dim:]              # state (+ lang)
+        # Fold cameras into the batch so the attention weights are shared.
+        x = tokens.reshape((-1, self.n_tok, self.feat_dim))  # (M, n_tok, feat)
+
+        for _ in range(self.num_layers):
+            h = nn.LayerNorm()(x) if self.layer_norm else x
+            h = nn.MultiHeadDotProductAttention(num_heads=self.num_heads)(h, h)
+            x = x + h
+            h = nn.LayerNorm()(x) if self.layer_norm else x
+            h = nn.Dense(self.feat_dim * self.mlp_ratio)(h)
+            h = nn.gelu(h)
+            h = nn.Dense(self.feat_dim)(h)
+            x = x + h
+
+        # Learned-query attention pool -> one vector per (camera in batch).
+        query = self.param('pool_query', nn.initializers.normal(0.02),
+                           (1, 1, self.feat_dim))
+        q = jnp.broadcast_to(query, (x.shape[0], 1, self.feat_dim))
+        kv = nn.LayerNorm()(x) if self.layer_norm else x
+        pooled = nn.MultiHeadDotProductAttention(num_heads=self.num_heads)(q, kv)
+        pooled = pooled.reshape((*lead, self.n_cam * self.feat_dim))
+        return jnp.concatenate([pooled, rest.astype(pooled.dtype)], axis=-1)
